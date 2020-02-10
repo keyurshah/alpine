@@ -9,7 +9,7 @@ export default [{
         input: 'src/index.js',
         output: {
             name: 'Alpine',
-            file: 'dist/alpine-ie11.js',
+            file: 'dist/alpine_ie11.js',
             format: 'umd',
             sourcemap: true,
         },
