@@ -6,8 +6,8 @@ import commonjs from '@rollup/plugin-commonjs'
 // import multi from '@rollup/plugin-multi-entry';
 
 export default {
-    input: ['src/index.js'],
     // input: ['src/polyfills.js', 'src/index.js'],
+    input: ['src/index.js'],
     output: {
         name: 'Alpine',
         file: 'dist/alpine-ie11.js',
@@ -16,8 +16,8 @@ export default {
     },
     plugins: [
         // multi(),
-        commonjs(),
         resolve(),
+        commonjs(),
         filesize(),
         terser({
             mangle: false,
