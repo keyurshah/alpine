@@ -3,10 +3,11 @@ import filesize from 'rollup-plugin-filesize';
 import { terser } from "rollup-plugin-terser";
 import resolve from "rollup-plugin-node-resolve"
 import commonjs from '@rollup/plugin-commonjs'
-import multi from '@rollup/plugin-multi-entry';
+// import multi from '@rollup/plugin-multi-entry';
 
 export default {
-    input: ['src/polyfills.js', 'src/index.js'],
+    input: ['src/index.js'],
+    // input: ['src/polyfills.js', 'src/index.js'],
     output: {
         name: 'Alpine',
         file: 'dist/alpine-ie11.js',
@@ -14,7 +15,7 @@ export default {
         sourcemap: true,
     },
     plugins: [
-        multi(),
+        // multi(),
         commonjs(),
         resolve(),
         filesize(),
