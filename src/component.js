@@ -1,4 +1,4 @@
-import { walk, saferEval, saferEvalNoReturn, getXAttrs, debounce } from './utils'
+import { walk, saferEval, saferEvalNoReturn, getXAttrs, debounce, deepProxy } from './utils'
 import { handleForDirective } from './directives/for'
 import { handleAttributeBindingDirective } from './directives/bind'
 import { handleShowDirective } from './directives/show'
@@ -18,13 +18,13 @@ export default class Component {
 
         const unobservedData = saferEval(dataExpression, {})
 
-        // For IE11, add our magic properties to the original data for access.
-        // Since the polyfill proxy does not allow properties to be added after creation 
-        if (window.document.documentMode) {
-            unobservedData.$el = null 
-            unobservedData.$refs = null 
-            unobservedData.$nextTick = null 
-        }
+        /* IE11-ONLY:START */
+            // For IE11, add our magic properties to the original data for access.
+            // The Proxy pollyfill does not allow properties to be added after creation.
+            unobservedData.$el = null
+            unobservedData.$refs = null
+            unobservedData.$nextTick = null
+        /* IE11-ONLY:END */
 
         // Construct a Proxy-based observable. This will be used to handle reactivity.
         this.$data = this.wrapDataInObservable(unobservedData)
@@ -38,6 +38,9 @@ export default class Component {
         unobservedData.$nextTick = (callback) => {
             this.nextTickStack.push(callback)
         }
+
+        this.showDirectiveStack = []
+        this.showDirectiveLastElement
 
         var initReturnedCallback
         if (initExpression) {
@@ -81,11 +84,9 @@ export default class Component {
 
         const proxyHandler = {
             set(obj, property, value) {
-                // If value is an Alpine proxy (i.e. an element returned when sorting a list of objects),
-                // we want to set the original element to avoid a matryoshka effect (nested proxies).
-                const setWasSuccessful = value['$isAlpineProxy']
-                    ? Reflect.set(obj, property, value['$originalTarget'])
-                    : Reflect.set(obj, property, value)
+                // Set the value converting it to a "Deep Proxy" when required
+                // Note that if a project is not a valid object, it won't be converted to a proxy
+                const setWasSuccessful = Reflect.set(obj, property, deepProxy(value, proxyHandler))
 
                 // Don't react to data changes for cases like the `x-created` hook.
                 if (self.pauseReactivity) return setWasSuccessful
@@ -105,28 +106,12 @@ export default class Component {
                 // Provide a way to determine if this object is an Alpine proxy or not.
                 if (key === "$isAlpineProxy") return true
 
-                // Provide a hook to access the underlying "proxied" data directly.
-                if (key === "$originalTarget") return target
-
-                // If the property we are trying to get is a proxy, just return it.
-                // Like in the case of $refs
-                if (target[key] && target[key].$isRefsProxy) return target[key]
-
-                // If property is a DOM node, just return it. (like in the case of this.$el)
-                if (target[key] && target[key] instanceof Node) return target[key]
-
-                // If accessing a nested property, return this proxy recursively.
-                // This enables reactivity on setting nested data.
-                if (typeof target[key] === 'object' && target[key] !== null) {
-                    return new Proxy(target[key], proxyHandler)
-                }
-
-                // If none of the above, just return the flippin' value. Gawsh.
+                // Just return the flippin' value. Gawsh.
                 return target[key]
             }
         }
 
-        return new Proxy(data, proxyHandler)
+        return deepProxy(data, proxyHandler)
     }
 
     walkAndSkipNestedComponents(el, callback, initializeComponentCallback = () => {}) {
@@ -157,6 +142,8 @@ export default class Component {
             el.__x = new Component(el)
         })
 
+        this.executeAndClearRemainingShowDirectiveStack()
+
         // Walk through the $nextTick stack and clear it as we go.
         while (this.nextTickStack.length > 0) {
             this.nextTickStack.shift()()
@@ -183,6 +170,34 @@ export default class Component {
         }, el => {
             el.__x = new Component(el)
         })
+
+        this.executeAndClearRemainingShowDirectiveStack()
+
+        // Walk through the $nextTick stack and clear it as we go.
+        while (this.nextTickStack.length > 0) {
+            this.nextTickStack.shift()()
+        }
+    }
+
+    executeAndClearRemainingShowDirectiveStack() {
+        // The goal here is to start all the x-show transitions
+        // and build a nested promise chain so that elements
+        // only hide when the children are finished hiding.
+        this.showDirectiveStack.reverse().map(thing => {
+            return new Promise(resolve => {
+                thing(finish => {
+                    resolve(finish)
+                })
+            })
+        }).reduce((nestedPromise, promise) => {
+            return nestedPromise.then(() => {
+                return promise.then(finish => finish())
+            })
+        }, Promise.resolve(() => {}))
+
+        // We've processed the handler stack. let's clear it.
+        this.showDirectiveStack = []
+        this.showDirectiveLastElement = undefined
     }
 
     updateElement(el, extraVars) {
@@ -237,7 +252,7 @@ export default class Component {
                 case 'show':
                     var output = this.evaluateReturnExpression(el, expression, extraVars)
 
-                    handleShowDirective(el, output, initialUpdate)
+                    handleShowDirective(this, el, output, modifiers, initialUpdate)
                     break;
 
                 case 'if':
@@ -268,7 +283,7 @@ export default class Component {
     }
 
     evaluateCommandExpression(el, expression, extraVars = () => {}) {
-        saferEvalNoReturn(expression, this.$data, {
+        return saferEvalNoReturn(expression, this.$data, {
             ...extraVars(),
             $dispatch: this.getDispatchFunction(el),
         })
@@ -330,21 +345,20 @@ export default class Component {
         var self = this
 
         var refObj = {}
-        
-        //add any properties that might be necessary for ie11 proxy
-        refObj.$isRefsProxy = false;
-        refObj.$isAlpineProxy = false;
 
-        // If we are in IE, since the polyfill needs all properties to be defined before building the proxy,
-        // we just loop on the element, look for any x-ref and create a the property on a fake object.
-        // We don't need to put a real value since it will be resolved by the proxy class
-        if (window.document.documentMode) {
+        /* IE11-ONLY:START */
+            // Add any properties up-front that might be necessary for the Proxy pollyfill.
+            refObj.$isRefsProxy = false;
+            refObj.$isAlpineProxy = false;
+
+            // If we are in IE, since the polyfill needs all properties to be defined before building the proxy,
+            // we just loop on the element, look for any x-ref and create a tmp property on a fake object.
             this.walkAndSkipNestedComponents(self.$el, el => {
                 if (el.hasAttribute('x-ref')) {
                     refObj[el.getAttribute('x-ref')] = true
                 }
             })
-        }
+        /* IE11-ONLY:END */
 
         // One of the goals of this is to not hold elements in memory, but rather re-evaluate
         // the DOM when the system needs something from it. This way, the framework is flexible and
@@ -352,7 +366,7 @@ export default class Component {
         // For this reason, I'm using an "on-demand" proxy to fake a "$refs" object.
         return new Proxy(refObj, {
             get(object, property) {
-                if (property === '$isRefsProxy') return true
+                if (property === '$isAlpineProxy') return true
 
                 var ref
 
